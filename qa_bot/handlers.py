@@ -1,224 +1,394 @@
-"""QA Bot — Telegram message and command handlers."""
-
+"""QA Bot — Telegram handlers v2.1. Inline keyboards, rich UX."""
 import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ContextTypes
-
-from .llm_client import ask_with_context
-from .quiz import QuizSession
+from telegram.ext import (
+    Application, CommandHandler, MessageHandler,
+    CallbackQueryHandler, filters, ContextTypes,
+)
+from .llm_client import ask_ai
+from .quiz import QuizSession, QUIZ_BANK
 
 logger = logging.getLogger(__name__)
 
-# --- Tools reference (compact, for /tools command) ---
-TOOLS_TEXT = """🧰 *Инструменты QA-тестировщика*
+# Welcome banner (public domain QA-themed image)
+WELCOME_IMAGE = "https://i.imgur.com/2nCt3Sbl.jpg"
 
-*🌐 WEB — Ручное тестирование*
-• [Chrome DevTools](https://developer.chrome.com/docs/devtools/) — инспектор, сеть, консоль
-• [Burp Suite Community](https://portswigger.net/burp/communitydownload) — HTTP-перехват, анализ API
+# ═══════════════════════════════════════════════════════════
+# KEYBOARDS
+# ═══════════════════════════════════════════════════════════
 
-*🤖 WEB — Автоматизация UI*
-• [Playwright](https://playwright.dev/) — современный, быстрый, мультибраузерный
-• [Selenium](https://www.selenium.dev/) — классика, огромное сообщество
-• [Cypress](https://www.cypress.io/) — только браузер, но очень удобный
-
-*📡 API-тестирование*
-• [Postman](https://www.postman.com/) — GUI для REST/GraphQL/gRPC
-• [Insomnia](https://insomnia.rest/) — лёгкая альтернатива Postman
-• [k6](https://k6.io/) — нагрузочное тестирование через JS
-
-*📱 Mobile*
-• [Appium](https://appium.io/) — автоматизация iOS и Android
-• [Charles Proxy](https://www.charlesproxy.com/) — перехват трафика на мобиле
-• [Android Studio Emulator](https://developer.android.com/studio) — эмулятор Android
-
-*📋 Тест-менеджмент*
-• [TestRail](https://www.testrail.com/) — профессиональный трекер тест-кейсов
-• [Allure](https://allurereport.org/) — красивые отчёты для автотестов
-• [Jira](https://www.atlassian.com/software/jira) — баг-трекер и таск-менеджер
-
-Нужны инструкции по конкретному инструменту? Просто спроси! 💬"""
+def kb_main_menu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🧪 Тест-кейсы", callback_data="menu_testcase"),
+         InlineKeyboardButton("🐛 Баг-репорт", callback_data="menu_bugreport")],
+        [InlineKeyboardButton("❓ Квиз ISTQB", callback_data="menu_quiz"),
+         InlineKeyboardButton("📚 Теория", callback_data="menu_theory")],
+        [InlineKeyboardButton("🧰 Инструменты", callback_data="menu_tools"),
+         InlineKeyboardButton("💼 Собеседование", callback_data="menu_interview")],
+        [InlineKeyboardButton("💬 Спросить AI", callback_data="menu_ask")],
+    ])
 
 
-# --- Generate test cases prompt ---
-TESTCASE_SYSTEM = """Ты — QA-инженер. Получаешь описание функциональности и пишешь тест-кейсы.
+def kb_quiz_levels() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🟢 Лёгкий", callback_data="quiz_easy"),
+         InlineKeyboardButton("🟡 Средний", callback_data="quiz_medium")],
+        [InlineKeyboardButton("🔴 Сложный", callback_data="quiz_hard"),
+         InlineKeyboardButton("🎲 Микс", callback_data="quiz_mixed")],
+        [InlineKeyboardButton("⬅️ Меню", callback_data="menu_main")],
+    ])
 
-Формат каждого тест-кейса:
-**TC-N: Название**
-- Предусловие: ...
-- Шаги:
-  1. ...
-  2. ...
-- Ожидаемый результат: ...
-- Тип: (positive/negative/boundary)
 
-Пиши на русском. Покрой позитивные, негативные сценарии и граничные значения."""
+def kb_theory_topics() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📐 Техники тест-дизайна", callback_data="theory_design"),
+         InlineKeyboardButton("🔬 Уровни тестирования", callback_data="theory_levels")],
+        [InlineKeyboardButton("⚡ Виды тестирования", callback_data="theory_types"),
+         InlineKeyboardButton("📋 ISTQB принципы", callback_data="theory_principles")],
+        [InlineKeyboardButton("🤖 Автоматизация", callback_data="theory_automation"),
+         InlineKeyboardButton("📱 Mobile тестирование", callback_data="theory_mobile")],
+        [InlineKeyboardButton("⬅️ Меню", callback_data="menu_main")],
+    ])
 
-BUG_REPORT_SYSTEM = """Ты — QA-инженер. Помогаешь правильно оформить баг-репорт.
 
-Формат:
-**Заголовок:** [краткое, точное описание]
-**Severity:** Critical / High / Medium / Low
-**Priority:** High / Medium / Low
-**Шаги воспроизведения:**
-1. ...
-**Фактический результат:** ...
-**Ожидаемый результат:** ...
-**Окружение:** [OS, браузер, версия приложения]
-**Вложения:** [скриншот/лог — если есть]"""
+def kb_back_to_menu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("⬅️ Главное меню", callback_data="menu_main")]
+    ])
 
+
+# ═══════════════════════════════════════════════════════════
+# WELCOME TEXT
+# ═══════════════════════════════════════════════════════════
+
+WELCOME_TEXT = (
+    "👋 <b>Привет! Я QA Fast Learning Bot</b> 🎓\n\n"
+    "Твой персональный помощник в мире тестирования.\n"
+    "Я обучаю по программе <b>ISTQB CTFL v4.0</b> и помогаю с реальными задачами.\n\n"
+    "Выбери раздел:"
+)
+
+# ═══════════════════════════════════════════════════════════
+# COMMAND HANDLERS
+# ═══════════════════════════════════════════════════════════
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /start command."""
-    text = (
-        "👋 Привет! Я QA-бот — твой помощник в тестировании.\n\n"
-        "Что я умею:\n"
-        "🧪 /testcase — сгенерировать тест-кейсы\n"
-        "🐛 /bugreport — помочь с баг-репортом\n"
-        "❓ /quiz — квиз по теории QA\n"
-        "🧰 /tools — инструменты тестировщика\n"
-        "💬 /ask — задать вопрос по QA\n"
-        "ℹ️ /help — все команды\n\n"
-        "Просто напиши мне вопрос — и я отвечу!"
-    )
-    await update.message.reply_text(text)
+    try:
+        await update.message.reply_photo(
+            photo=WELCOME_IMAGE,
+            caption=WELCOME_TEXT,
+            parse_mode="HTML",
+            reply_markup=kb_main_menu(),
+        )
+    except Exception:
+        await update.message.reply_text(
+            WELCOME_TEXT, parse_mode="HTML", reply_markup=kb_main_menu()
+        )
 
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /help command."""
     text = (
-        "📖 *Команды бота:*\n\n"
+        "📖 <b>Доступные команды:</b>\n\n"
+        "/start — главное меню\n"
         "/testcase — генерация тест-кейсов\n"
-        "   _Пришли описание функции — получи тест-кейсы_\n\n"
-        "/bugreport — баг-репорт\n"
-        "   _Опиши баг — получи правильно оформленный репорт_\n\n"
-        "/quiz — теория QA\n"
-        "   _5 вопросов с вариантами ответов_\n\n"
-        "/tools — инструменты\n"
-        "   _Selenium, Playwright, Postman, Appium и другие_\n\n"
-        "/ask — любой вопрос по QA\n"
-        "   _Например: \"Чем regression отличается от retesting?\"_\n\n"
-        "Или просто пиши — без команды 💬"
+        "/bugreport — оформить баг-репорт\n"
+        "/quiz — квиз по ISTQB\n"
+        "/theory — теория тестирования\n"
+        "/tools — инструменты QA\n"
+        "/interview — подготовка к собеседованию\n"
+        "/ask — задать вопрос AI\n\n"
+        "<i>Или просто напиши вопрос — я отвечу!</i>"
     )
-    await update.message.reply_text(text, parse_mode="Markdown")
+    await update.message.reply_text(text, parse_mode="HTML", reply_markup=kb_back_to_menu())
 
 
 async def cmd_testcase(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /testcase command."""
-    args = " ".join(context.args) if context.args else ""
-    if args:
-        await update.message.reply_text("⏳ Генерирую тест-кейсы...")
-        response = ask_with_context(
-            f"Напиши тест-кейсы для следующей функциональности:\n\n{args}",
-            history=[]
-        )
-        await update.message.reply_text(response)
-    else:
-        await update.message.reply_text(
-            "✍️ Опиши функциональность, для которой нужны тест-кейсы.\n\n"
-            "Например:\n"
-            "/testcase Форма регистрации: поля email, пароль, подтверждение пароля. "
-            "Email должен быть уникальным. Пароль — минимум 8 символов."
-        )
-    # Store mode
     context.user_data["mode"] = "testcase"
+    text = (
+        "🧪 <b>Генерация тест-кейсов</b>\n\n"
+        "Опиши функциональность — я создам тест-кейсы по ISTQB-стандарту.\n\n"
+        "<i>Пример:</i>\n"
+        "«Форма входа: поля email и пароль. Email должен существовать в базе. "
+        "После 5 неверных попыток — блокировка на 15 минут.»"
+    )
+    await update.message.reply_text(text, parse_mode="HTML", reply_markup=kb_back_to_menu())
 
 
 async def cmd_bugreport(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /bugreport command."""
-    args = " ".join(context.args) if context.args else ""
-    if args:
-        await update.message.reply_text("⏳ Оформляю баг-репорт...")
-        response = ask_with_context(
-            f"Оформи баг-репорт по описанию:\n\n{args}",
-        )
-        await update.message.reply_text(response)
-    else:
-        context.user_data["mode"] = "bugreport"
-        await update.message.reply_text(
-            "🐛 Опиши баг — что произошло, при каких условиях, что ожидалось.\n\n"
-            "Пример:\n"
-            "При регистрации с email 'test@test.com' и паролем '123' система "
-            "показывает ошибку 500 вместо сообщения о слишком коротком пароле."
-        )
+    context.user_data["mode"] = "bugreport"
+    text = (
+        "🐛 <b>Оформление баг-репорта</b>\n\n"
+        "Опиши баг — я оформлю его по стандарту.\n\n"
+        "<i>Пример:</i>\n"
+        "«При вводе пароля из 7 символов система принимает его, "
+        "хотя должна требовать минимум 8.»"
+    )
+    await update.message.reply_text(text, parse_mode="HTML", reply_markup=kb_back_to_menu())
 
 
 async def cmd_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /quiz command — start a new quiz session."""
-    session = QuizSession()
-    context.user_data["quiz"] = session
-    context.user_data["mode"] = "quiz"
-    question = session.current_question()
+    text = (
+        f"❓ <b>Квиз по ISTQB</b>\n\n"
+        f"База: {len(QUIZ_BANK)} вопросов из официальных программ ISTQB.\n"
+        "Выбери уровень сложности:"
+    )
+    await update.message.reply_text(text, parse_mode="HTML", reply_markup=kb_quiz_levels())
+
+
+async def cmd_theory(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
-        "🎯 *Квиз по теории QA*\n\n" + question,
-        parse_mode="Markdown"
+        "📚 <b>Теория тестирования</b>\n\nВыбери тему:",
+        parse_mode="HTML",
+        reply_markup=kb_theory_topics(),
     )
 
 
 async def cmd_tools(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /tools command."""
-    await update.message.reply_text(TOOLS_TEXT, parse_mode="Markdown",
-                                    disable_web_page_preview=True)
+    await _send_tools(update.message.reply_text)
+
+
+async def cmd_interview(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    context.user_data["mode"] = "interview"
+    text = (
+        "💼 <b>Подготовка к собеседованию</b>\n\n"
+        "Задай тему — и я дам типичные вопросы с ответами.\n\n"
+        "Например:\n"
+        "• «Вопросы по теории тестирования»\n"
+        "• «API тестирование на собеседовании»\n"
+        "• «Как ответить на вопрос о приоритизации багов»"
+    )
+    await update.message.reply_text(text, parse_mode="HTML", reply_markup=kb_back_to_menu())
 
 
 async def cmd_ask(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /ask command."""
-    args = " ".join(context.args) if context.args else ""
-    if args:
-        await update.message.reply_text("🤔 Думаю...")
-        response = ask_with_context(args)
-        await update.message.reply_text(response)
-    else:
+    context.user_data["mode"] = "ask"
+    await update.message.reply_text(
+        "💬 <b>Спроси AI-эксперта</b>\n\nЗадай любой вопрос по QA:",
+        parse_mode="HTML",
+        reply_markup=kb_back_to_menu(),
+    )
+
+
+# ═══════════════════════════════════════════════════════════
+# CALLBACK HANDLER
+# ═══════════════════════════════════════════════════════════
+
+async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+
+    # Main menu navigation
+    if data == "menu_main":
+        await query.message.edit_text(
+            WELCOME_TEXT, parse_mode="HTML", reply_markup=kb_main_menu()
+        )
+    elif data == "menu_testcase":
+        context.user_data["mode"] = "testcase"
+        await query.message.edit_text(
+            "🧪 <b>Генерация тест-кейсов</b>\n\nОпиши функциональность:",
+            parse_mode="HTML", reply_markup=kb_back_to_menu()
+        )
+    elif data == "menu_bugreport":
+        context.user_data["mode"] = "bugreport"
+        await query.message.edit_text(
+            "🐛 <b>Оформление баг-репорта</b>\n\nОпиши проблему:",
+            parse_mode="HTML", reply_markup=kb_back_to_menu()
+        )
+    elif data == "menu_quiz":
+        await query.message.edit_text(
+            f"❓ <b>Квиз по ISTQB</b>\n\nБаза: {len(QUIZ_BANK)} вопросов. Выбери уровень:",
+            parse_mode="HTML", reply_markup=kb_quiz_levels()
+        )
+    elif data == "menu_theory":
+        await query.message.edit_text(
+            "📚 <b>Теория тестирования</b>\n\nВыбери тему:",
+            parse_mode="HTML", reply_markup=kb_theory_topics()
+        )
+    elif data == "menu_tools":
+        await _send_tools(
+            lambda t, **kw: query.message.edit_text(t, **kw)
+        )
+    elif data == "menu_interview":
+        context.user_data["mode"] = "interview"
+        await query.message.edit_text(
+            "💼 <b>Собеседование</b>\n\nНапиши тему — дам вопросы и ответы:",
+            parse_mode="HTML", reply_markup=kb_back_to_menu()
+        )
+    elif data == "menu_ask":
         context.user_data["mode"] = "ask"
-        await update.message.reply_text(
-            "💬 Задай вопрос по QA-тестированию.\n\n"
-            "Например: «В чём разница между smoke и sanity тестами?»"
+        await query.message.edit_text(
+            "💬 <b>AI-эксперт</b>\n\nЗадай любой вопрос по QA:",
+            parse_mode="HTML", reply_markup=kb_back_to_menu()
+        )
+
+    # Quiz level selection
+    elif data.startswith("quiz_"):
+        level = data[5:]  # easy / medium / hard / mixed
+        session = QuizSession(level=level)
+        context.user_data["quiz"] = session
+        context.user_data["mode"] = "quiz"
+        await query.message.edit_text(
+            session.current_question(),
+            parse_mode="HTML",
+            reply_markup=kb_back_to_menu(),
+        )
+
+    # Theory topics
+    elif data.startswith("theory_"):
+        topic = data[7:]
+        await query.message.edit_text("⏳ Загружаю теорию...", parse_mode="HTML")
+        content = await _get_theory(topic)
+        await query.message.edit_text(
+            content, parse_mode="HTML", reply_markup=kb_theory_topics(),
+            disable_web_page_preview=True
         )
 
 
+# ═══════════════════════════════════════════════════════════
+# MESSAGE HANDLER
+# ═══════════════════════════════════════════════════════════
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle free-form text messages."""
     text = update.message.text.strip()
     mode = context.user_data.get("mode", "ask")
 
-    # Quiz mode — process answer
+    # Quiz
     if mode == "quiz":
         session: QuizSession | None = context.user_data.get("quiz")
         if session and not session.is_finished:
             response = session.answer(text)
+            kb = None if session.is_finished else kb_back_to_menu()
             if session.is_finished:
                 context.user_data.pop("mode", None)
                 context.user_data.pop("quiz", None)
-            await update.message.reply_text(response, parse_mode="Markdown")
+            await update.message.reply_text(response, parse_mode="HTML", reply_markup=kb)
             return
 
-    # Testcase mode
+    # Testcase
     if mode == "testcase":
-        await update.message.reply_text("⏳ Генерирую тест-кейсы...")
-        response = ask_with_context(
-            f"Напиши тест-кейсы для:\n\n{text}",
+        msg = await update.message.reply_text("⏳ Генерирую тест-кейсы по ISTQB...")
+        response = await ask_ai(
+            f"Напиши подробные тест-кейсы по ISTQB-стандарту для:\n\n{text}",
+            system_override=_TESTCASE_SYSTEM,
         )
         context.user_data.pop("mode", None)
-        await update.message.reply_text(response)
+        await msg.delete()
+        await update.message.reply_text(response, parse_mode="HTML", reply_markup=kb_main_menu())
         return
 
-    # Bugreport mode
+    # Bugreport
     if mode == "bugreport":
-        await update.message.reply_text("⏳ Оформляю баг-репорт...")
-        response = ask_with_context(
-            f"Оформи баг-репорт:\n\n{text}",
+        msg = await update.message.reply_text("⏳ Оформляю баг-репорт...")
+        response = await ask_ai(
+            f"Оформи баг-репорт по стандарту:\n\n{text}",
+            system_override=_BUGREPORT_SYSTEM,
         )
         context.user_data.pop("mode", None)
-        await update.message.reply_text(response)
+        await msg.delete()
+        await update.message.reply_text(response, parse_mode="HTML", reply_markup=kb_main_menu())
+        return
+
+    # Interview
+    if mode == "interview":
+        msg = await update.message.reply_text("⏳ Готовлю вопросы для собеседования...")
+        response = await ask_ai(
+            f"Дай топ-5 вопросов на собеседовании по теме «{text}» с развёрнутыми ответами.",
+        )
+        context.user_data.pop("mode", None)
+        await msg.delete()
+        await update.message.reply_text(response, parse_mode="HTML", reply_markup=kb_main_menu())
         return
 
     # Default: general QA question
-    await update.message.reply_text("🤔 Думаю...")
-    history = context.user_data.get("history", [])
-    response = ask_with_context(text, history=history)
+    msg = await update.message.reply_text("🤔 Думаю...")
+    response = await ask_ai(text)
+    await msg.delete()
+    await update.message.reply_text(response, parse_mode="HTML", reply_markup=kb_main_menu())
 
-    # Update history (keep last 6 turns)
-    history.append({"role": "user", "content": text})
-    history.append({"role": "assistant", "content": response})
-    context.user_data["history"] = history[-12:]
 
-    await update.message.reply_text(response)
+# ═══════════════════════════════════════════════════════════
+# HELPERS
+# ═══════════════════════════════════════════════════════════
+
+_TESTCASE_SYSTEM = """Ты — QA-инженер. Пишешь тест-кейсы по ISTQB-стандарту в HTML для Telegram.
+
+Формат каждого тест-кейса (HTML):
+<b>TC-N: Название</b>
+• <b>Предусловие:</b> ...
+• <b>Шаги:</b> 1. ... 2. ...
+• <b>Ожидаемый результат:</b> ...
+• <b>Тип:</b> positive/negative/boundary
+
+Покрой: позитивные, негативные и граничные сценарии."""
+
+_BUGREPORT_SYSTEM = """Ты — QA-инженер. Оформляешь баг-репорты в HTML для Telegram.
+
+Формат:
+<b>Заголовок:</b> [краткое описание]
+<b>Severity:</b> Critical / High / Medium / Low
+<b>Priority:</b> High / Medium / Low
+<b>Шаги воспроизведения:</b>
+1. ...
+<b>Фактический результат:</b> ...
+<b>Ожидаемый результат:</b> ...
+<b>Окружение:</b> [OS, браузер/версия приложения]"""
+
+_THEORY_TOPICS = {
+    "design": "техники тест-дизайна: EP, BVA, Decision Table, State Transition, Use Case",
+    "levels": "уровни тестирования: компонентное, интеграционное, системное, приёмочное",
+    "types": "виды тестирования: функциональное, нефункциональное, структурное, регрессионное, exploratory",
+    "principles": "7 принципов тестирования по ISTQB CTFL v4.0",
+    "automation": "автоматизация тестирования: инструменты, подходы, пирамида тестирования",
+    "mobile": "мобильное тестирование по ISTQB Mobile Tester: native/hybrid/web, эмуляторы vs реальные устройства",
+}
+
+
+async def _get_theory(topic: str) -> str:
+    topic_desc = _THEORY_TOPICS.get(topic, topic)
+    return await ask_ai(
+        f"Объясни подробно тему: {topic_desc}. Дай примеры. Ссылайся на ISTQB."
+    )
+
+
+async def _send_tools(send_fn) -> None:
+    text = (
+        "🧰 <b>Инструменты QA-тестировщика</b>\n\n"
+        "<b>🌐 Web — ручное тестирование</b>\n"
+        "• <a href='https://developer.chrome.com/docs/devtools/'>Chrome DevTools</a> — инспектор, сеть, консоль\n"
+        "• <a href='https://portswigger.net/burp/communitydownload'>Burp Suite Community</a> — анализ HTTP/API\n\n"
+        "<b>🤖 Web — автоматизация UI</b>\n"
+        "• <a href='https://playwright.dev/'>Playwright</a> — быстрый, мультибраузерный\n"
+        "• <a href='https://www.selenium.dev/'>Selenium</a> — классика\n"
+        "• <a href='https://www.cypress.io/'>Cypress</a> — удобный для front-end\n\n"
+        "<b>📡 API-тестирование</b>\n"
+        "• <a href='https://www.postman.com/'>Postman</a> — GUI для REST/GraphQL\n"
+        "• <a href='https://k6.io/'>k6</a> — нагрузочное тестирование\n\n"
+        "<b>📱 Mobile</b>\n"
+        "• <a href='https://appium.io/'>Appium</a> — iOS и Android автоматизация\n"
+        "• <a href='https://www.charlesproxy.com/'>Charles Proxy</a> — перехват трафика\n\n"
+        "<b>📋 Трекеры</b>\n"
+        "• <a href='https://www.testrail.com/'>TestRail</a> — тест-кейсы\n"
+        "• <a href='https://allurereport.org/'>Allure</a> — отчёты\n"
+        "• <a href='https://www.atlassian.com/software/jira'>Jira</a> — задачи и баги"
+    )
+    await send_fn(text, parse_mode="HTML", reply_markup=kb_back_to_menu(),
+                  disable_web_page_preview=False)
+
+
+# ═══════════════════════════════════════════════════════════
+# REGISTRATION
+# ═══════════════════════════════════════════════════════════
+
+def register_handlers(app: Application) -> None:
+    app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("help", cmd_help))
+    app.add_handler(CommandHandler("testcase", cmd_testcase))
+    app.add_handler(CommandHandler("bugreport", cmd_bugreport))
+    app.add_handler(CommandHandler("quiz", cmd_quiz))
+    app.add_handler(CommandHandler("theory", cmd_theory))
+    app.add_handler(CommandHandler("tools", cmd_tools))
+    app.add_handler(CommandHandler("interview", cmd_interview))
+    app.add_handler(CommandHandler("ask", cmd_ask))
+    app.add_handler(CallbackQueryHandler(handle_callback))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))

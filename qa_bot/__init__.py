@@ -1,1 +1,1 @@
-# QA Bot — обучающий Telegram-бот для тестировщиков
+"""QA Fast Learning Bot — v2.1"""

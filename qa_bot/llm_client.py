@@ -1,88 +1,77 @@
-"""QA Bot — LLM client using OpenRouter free models with fallback."""
-
+"""QA Bot — LLM client v2.1. OpenRouter with smart model fallback."""
 import os
-import time
 import logging
-from typing import Optional
-
-import requests
+import aiohttp
 
 logger = logging.getLogger(__name__)
 
-# Free models in priority order (OpenRouter free tier)
-FREE_MODELS = [
+OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+
+SYSTEM_PROMPT = """Ты — опытный QA-инженер с 10+ годами опыта.
+Помогаешь тестировщикам — от джунов до мидлов — разбираться в профессии.
+Отвечаешь строго на русском языке. Используй HTML-форматирование для Telegram:
+<b>жирный</b>, <i>курсив</i>, <code>код</code>, <pre>блок кода</pre>.
+Отвечай кратко и по делу. Максимум 600 слов. Приводи конкретные примеры.
+Ссылайся на ISTQB-стандарты когда уместно."""
+
+# Free models through OpenRouter — ordered by reliability
+MODELS = [
     "google/gemini-2.0-flash-exp:free",
-    "meta-llama/llama-3.1-8b-instruct:free",
-    "microsoft/phi-3-mini-128k-instruct:free",
-    "qwen/qwen-2-7b-instruct:free",
+    "meta-llama/llama-3.3-70b-instruct:free",
+    "google/gemini-flash-1.5:free",
+    "microsoft/phi-4-reasoning:free",
 ]
 
-OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
-OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 
-# QA Bot system prompt — short, focused, professional
-QA_SYSTEM_PROMPT = """Ты — опытный QA-инженер и ментор. Отвечаешь на русском языке.
+async def ask_ai(user_message: str, system_override: str = "") -> str:
+    """Call LLM with QA context. Returns response text or user-friendly error."""
+    api_key = os.getenv("OPENROUTER_API_KEY", "")
+    if not api_key:
+        return "❌ OpenRouter API ключ не настроен. Обратитесь к администратору."
 
-Твои специализации:
-- Написание тест-кейсов (ручное и автоматизированное тестирование)
-- Тест-планирование и стратегии тестирования
-- API-тестирование (Postman, REST, GraphQL)
-- UI-автоматизация (Selenium, Playwright, Cypress, Appium)
-- Мобильное тестирование (iOS, Android)
-- Баг-репорты и работа с Jira
-- Теория тестирования (виды тестов, пирамида тестирования, SDLC)
+    system = system_override or SYSTEM_PROMPT
+    messages = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user_message},
+    ]
 
-Стиль ответов:
-- Конкретно и по делу
-- С примерами кода когда уместно
-- Без лишней воды
-- Используй markdown для форматирования"""
+    for model in MODELS:
+        result = await _try_model(api_key, model, messages)
+        if result:
+            return result
+
+    return "⚠️ AI-сервис временно недоступен. Попробуйте через пару минут."
 
 
-def ask_llm(messages: list[dict], system: str = QA_SYSTEM_PROMPT,
-            max_tokens: int = 1500) -> str:
-    """Send messages to LLM with automatic fallback through free models."""
-    if not OPENROUTER_API_KEY:
-        return "❌ OPENROUTER_API_KEY не задан. Добавьте ключ в переменные окружения."
+async def _try_model(api_key: str, model: str, messages: list) -> str:
+    """Try one model up to 2 times. Returns text or empty string."""
+    import asyncio
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://github.com/KonstantinVCH/QA_fast_learning_bot",
+        "X-Title": "QA Fast Learning Bot",
+    }
+    payload = {"model": model, "messages": messages, "max_tokens": 1000, "temperature": 0.7}
+    timeout = aiohttp.ClientTimeout(total=30)
 
-    full_messages = [{"role": "system", "content": system}] + messages
-
-    for model in FREE_MODELS:
+    for attempt in range(2):
         try:
-            resp = requests.post(
-                OPENROUTER_API_URL,
-                headers={
-                    "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-                    "HTTP-Referer": "https://github.com/ouroboros-ai",
-                    "X-Title": "QA-Bot",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": model,
-                    "messages": full_messages,
-                    "max_tokens": max_tokens,
-                    "temperature": 0.7,
-                },
-                timeout=30,
-            )
-            if resp.status_code == 200:
-                data = resp.json()
-                content = data["choices"][0]["message"]["content"]
-                if content and len(content.strip()) > 10:
-                    logger.info("LLM response from model: %s", model)
-                    return content.strip()
-        except requests.Timeout:
-            logger.warning("Timeout from model %s, trying next", model)
-        except Exception as exc:
-            logger.warning("Error from model %s: %s", model, exc)
-        time.sleep(0.5)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(OPENROUTER_URL, json=payload, headers=headers) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        text = data["choices"][0]["message"]["content"].strip()
+                        if text:
+                            return text
+                    elif resp.status == 429:
+                        logger.warning(f"Rate limit on {model}")
+                        return ""
+                    else:
+                        logger.warning(f"HTTP {resp.status} from {model}")
+        except Exception as e:
+            logger.warning(f"Model {model} attempt {attempt + 1} error: {e}")
+            if attempt == 0:
+                await asyncio.sleep(2)
 
-    return "⚠️ Все модели временно недоступны. Попробуйте через минуту."
-
-
-def ask_with_context(user_text: str, history: list[dict] | None = None) -> str:
-    """Ask LLM with optional conversation history."""
-    messages = history or []
-    messages = messages[-6:]  # Keep last 6 turns for context
-    messages.append({"role": "user", "content": user_text})
-    return ask_llm(messages)
+    return ""
