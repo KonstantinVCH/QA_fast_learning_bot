@@ -1,6 +1,7 @@
-"""QA Bot — LLM client v3.1. OpenRouter with current models."""
+"""QA Bot — LLM client v3.2. Async OpenRouter with fallback models."""
 import json
 import os
+import asyncio
 import urllib.request
 import urllib.error
 import logging
@@ -11,15 +12,15 @@ OPENROUTER_KEY = os.getenv("OPENROUTER_API_KEY", "")
 
 # Current working models on OpenRouter (March 2026)
 MODELS = [
-    "qwen/qwen3.5-flash-02-23",       # Fastest, cheap
-    "liquid/lfm-2-24b-a2b",           # Ultra cheap
-    "google/gemini-3.1-flash-lite-preview",  # Google, good quality
-    "bytedance-seed/seed-2.0-mini",   # ByteDance, 256k context
+    "qwen/qwen3.5-flash-02-23",
+    "liquid/lfm-2-24b-a2b",
+    "google/gemini-3.1-flash-lite-preview",
+    "bytedance-seed/seed-2.0-mini",
 ]
 
 
-def ask_ai(system_prompt: str, user_message: str, max_tokens: int = 800) -> str:
-    """Ask AI with fallback through multiple models."""
+def _ask_ai_sync(system_prompt: str, user_message: str, max_tokens: int = 800) -> str:
+    """Synchronous AI call with fallback through multiple models."""
     if not OPENROUTER_KEY:
         logger.warning("No OPENROUTER_API_KEY set")
         return ""
@@ -61,3 +62,13 @@ def ask_ai(system_prompt: str, user_message: str, max_tokens: int = 800) -> str:
     logger.error("All AI models failed")
     return ""
 
+
+async def ask_ai(system_prompt: str, user_message: str = "", max_tokens: int = 800) -> str:
+    """Async AI call. Accepts (system, user) or (user_only) for backward compat."""
+    if not user_message:
+        # Called with single arg: ask_ai(text) - use as user message
+        user_message = system_prompt
+        system_prompt = "Ты опытный QA-инженер. Отвечай кратко, по делу, на русском языке."
+    
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, _ask_ai_sync, system_prompt, user_message, max_tokens)
