@@ -1,4 +1,4 @@
-"""QA Bot — entry point v2.2. Run with: python -m qa_bot.bot"""
+"""QA Bot v3.0 — entry point."""
 import logging
 from telegram.ext import Application
 
@@ -12,7 +12,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def main():
+def main() -> None:
     logger.info(f"Starting QA Fast Learning Bot v{BOT_VERSION}")
     app = Application.builder().token(BOT_TOKEN).build()
     register_handlers(app)
