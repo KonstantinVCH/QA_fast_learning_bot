@@ -1,4 +1,4 @@
-"""QA Bot — entry point v2.1. Run with: python -m qa_bot.bot"""
+"""QA Bot — entry point v2.2. Run with: python -m qa_bot.bot"""
 import logging
 from telegram.ext import Application
 
