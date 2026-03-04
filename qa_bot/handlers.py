@@ -5,7 +5,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 
 from .quiz import get_quiz_question, check_answer, get_quiz_stats
-from .llm_client import ask_llm
+from .llm_client import ask_ai as ask_llm
 
 logger = logging.getLogger(__name__)
 
